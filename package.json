@@ -6,7 +6,8 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "empaquetar": "powershell -ExecutionPolicy Bypass -File ./scripts/empaquetar-para-otra-pc.ps1"
   },
   "dependencies": {
     "pusher": "^5.2.0",

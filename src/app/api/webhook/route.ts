@@ -2,7 +2,13 @@ import { NextResponse } from 'next/server';
 import { supabaseAdmin } from '@/lib/supabase';
 import { forwardMessageToLaravel } from '@/lib/laravel-sync';
 import { broadcastChatMessage } from '@/lib/pusher';
+import {
+  enrichInboundEventImage,
+  resolveRomaApiPublicBase,
+} from '@/lib/whatsapp-media-download';
 import { WebhookInboundEvent } from '@/types/whatsapp';
+
+const MEDIA_PIPELINE_VERSION = 3;
 
 // Helper to fetch settings dynamically from DB
 async function getSettings() {
@@ -58,14 +64,42 @@ export async function POST(request: Request) {
 
         // Process messages
         if (messages && messages.length > 0) {
+          const accessToken = settings.meta_access_token as string;
+
           for (const message of messages) {
-            const normalized = normalizeMessageEvent(message, value.metadata.phone_number_id);
+            let normalized = normalizeMessageEvent(message, value.metadata.phone_number_id);
+
+            if (normalized.message_type === 'image') {
+              console.log('[webhook] pipeline imagen v' + MEDIA_PIPELINE_VERSION, {
+                hasToken: Boolean(accessToken?.trim()),
+                publicBase: resolveRomaApiPublicBase() || '(vacío — falta ROMA_API_PUBLIC_URL en .env.local)',
+              });
+
+              if (!accessToken?.trim()) {
+                console.warn('[webhook] Imagen sin meta_access_token en app_settings (Supabase)');
+              } else {
+                try {
+                  const resolvedUrl = await enrichInboundEventImage(normalized, accessToken);
+                  if (resolvedUrl && !resolvedUrl.includes('lookaside.fbsbx.com')) {
+                    normalized = { ...normalized, image_url: resolvedUrl };
+                    console.log('[webhook] image_url reemplazada para CRM', {
+                      url: resolvedUrl.slice(0, 120),
+                    });
+                  } else {
+                    console.warn('[webhook] enrich no reemplazó lookaside', {
+                      result: resolvedUrl?.slice(0, 80) ?? null,
+                    });
+                  }
+                } catch (enrichErr) {
+                  console.error('[webhook] enrichInboundEventImage error', enrichErr);
+                }
+              }
+            }
+
             normalizedEvents.push(normalized);
 
-            // Log to Supabase
             await logInboundToSupabase(traceId, normalized);
 
-            // Broadcast via Pusher
             await broadcastChatMessage({
               wa_id: normalized.wa_id,
               sender_phone: normalized.from,
@@ -73,7 +107,6 @@ export async function POST(request: Request) {
               direction: 'inbound',
             });
 
-            // Forward to Laravel with normalized format
             await forwardMessageToLaravel(normalized);
           }
         }

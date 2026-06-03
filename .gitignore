@@ -20,6 +20,10 @@
 # production
 /build
 
+# Fotos entrantes descargadas de WhatsApp (servidas en /inbound-media/)
+/public/inbound-media/*
+!/public/inbound-media/.gitkeep
+
 # misc
 .DS_Store
 *.pem
