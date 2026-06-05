@@ -99,7 +99,15 @@ export interface SendMessageResponse {
 
 // Webhook inbound types
 export type WebhookEventType = 'message' | 'status';
-export type WebhookMessageType = 'text' | 'image' | 'interactive_button_reply' | 'interactive_list_reply';
+export type WebhookMessageType =
+  | 'text'
+  | 'image'
+  | 'audio'
+  | 'video'
+  | 'sticker'
+  | 'document'
+  | 'interactive_button_reply'
+  | 'interactive_list_reply';
 
 export interface InteractiveReply {
   reply_type: 'button' | 'list';
@@ -115,6 +123,8 @@ export interface WebhookInboundEvent {
   text?: string;
   interactive?: InteractiveReply;
   image_url?: string;
+  media_url?: string;
+  mime_type?: string;
   status?: 'sent' | 'delivered' | 'read' | 'failed';
   timestamp: string;
   raw: any;

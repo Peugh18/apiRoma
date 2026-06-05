@@ -1,10 +1,8 @@
 import fs from 'fs/promises';
 import path from 'path';
 import { NextResponse } from 'next/server';
+import { mimeFromFilename } from '@/lib/whatsapp-media-download';
 
-/**
- * Sirve fotos guardadas en public/inbound-media (Next no siempre expone archivos runtime vía /public).
- */
 export async function GET(
   _request: Request,
   context: { params: Promise<{ filename: string }> }
@@ -19,14 +17,13 @@ export async function GET(
 
   try {
     const buffer = await fs.readFile(filePath);
-    const ext = safe.split('.').pop()?.toLowerCase();
-    const mime =
-      ext === 'png' ? 'image/png' : ext === 'webp' ? 'image/webp' : 'image/jpeg';
+    const mime = mimeFromFilename(safe);
 
     return new NextResponse(buffer, {
       headers: {
         'Content-Type': mime,
         'Cache-Control': 'private, max-age=86400',
+        'Access-Control-Allow-Origin': '*',
       },
     });
   } catch {

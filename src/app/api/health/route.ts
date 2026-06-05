@@ -5,7 +5,7 @@ import { resolveRomaApiPublicBase } from '@/lib/whatsapp-media-download';
 export async function GET() {
   return NextResponse.json({
     ok: true,
-    media_pipeline_version: 3,
+    media_pipeline_version: 4,
     roma_api_public_url: resolveRomaApiPublicBase() || null,
     has_laravel_sync: Boolean(process.env.LARAVEL_MESSAGES_URL),
   });

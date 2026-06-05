@@ -3,23 +3,22 @@ import { supabaseAdmin } from '@/lib/supabase';
 import { forwardMessageToLaravel } from '@/lib/laravel-sync';
 import { broadcastChatMessage } from '@/lib/pusher';
 import {
-  enrichInboundEventImage,
+  enrichInboundEventMedia,
+  isDownloadableInboundMedia,
   resolveRomaApiPublicBase,
 } from '@/lib/whatsapp-media-download';
 import { WebhookInboundEvent } from '@/types/whatsapp';
 
-const MEDIA_PIPELINE_VERSION = 3;
+const MEDIA_PIPELINE_VERSION = 4;
 
-// Helper to fetch settings dynamically from DB
 async function getSettings() {
   const { data } = await supabaseAdmin.from('app_settings').select('*').eq('id', 1).single();
   return data;
 }
 
-// GET handler for Meta webhook verification
 export async function GET(request: Request) {
   const { searchParams } = new URL(request.url);
-  
+
   const mode = searchParams.get('hub.mode');
   const token = searchParams.get('hub.verify_token');
   const challenge = searchParams.get('hub.challenge');
@@ -33,10 +32,9 @@ export async function GET(request: Request) {
   return NextResponse.json({ error: 'Invalid verification token' }, { status: 403 });
 }
 
-// POST handler for receiving messages
 export async function POST(request: Request) {
   const traceId = `trace_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
-  
+
   try {
     const body = await request.json();
     console.log('Webhook payload received:', JSON.stringify(body, null, 2));
@@ -53,45 +51,54 @@ export async function POST(request: Request) {
 
     const entries = body.entry || [];
     const normalizedEvents: WebhookInboundEvent[] = [];
-    
+
     for (const entry of entries) {
       const changes = entry.changes || [];
-      
+
       for (const change of changes) {
         const value = change.value;
         const messages = value.messages;
         const statuses = value.statuses;
 
-        // Process messages
         if (messages && messages.length > 0) {
           const accessToken = settings.meta_access_token as string;
 
           for (const message of messages) {
             let normalized = normalizeMessageEvent(message, value.metadata.phone_number_id);
 
-            if (normalized.message_type === 'image') {
-              console.log('[webhook] pipeline imagen v' + MEDIA_PIPELINE_VERSION, {
+            if (isDownloadableInboundMedia(normalized.message_type)) {
+              console.log('[webhook] pipeline media v' + MEDIA_PIPELINE_VERSION, {
+                type: normalized.message_type,
                 hasToken: Boolean(accessToken?.trim()),
-                publicBase: resolveRomaApiPublicBase() || '(vacío — falta ROMA_API_PUBLIC_URL en .env.local)',
+                publicBase: resolveRomaApiPublicBase() || '(vacío — falta ROMA_API_PUBLIC_URL)',
               });
 
               if (!accessToken?.trim()) {
-                console.warn('[webhook] Imagen sin meta_access_token en app_settings (Supabase)');
+                console.warn('[webhook] Media sin meta_access_token en app_settings (Supabase)');
               } else {
                 try {
-                  const resolvedUrl = await enrichInboundEventImage(normalized, accessToken);
-                  if (resolvedUrl && !resolvedUrl.includes('lookaside.fbsbx.com')) {
-                    normalized = { ...normalized, image_url: resolvedUrl };
-                    console.log('[webhook] image_url reemplazada para CRM', {
-                      url: resolvedUrl.slice(0, 120),
+                  const resolved = await enrichInboundEventMedia(normalized, accessToken);
+                  if (resolved.url && !resolved.url.includes('lookaside.fbsbx.com')) {
+                    normalized = {
+                      ...normalized,
+                      media_url: resolved.url,
+                      mime_type: resolved.mime,
+                    };
+                    if (normalized.message_type === 'image' || normalized.message_type === 'sticker') {
+                      normalized = { ...normalized, image_url: resolved.url };
+                    }
+                    console.log('[webhook] media_url resuelta para CRM', {
+                      type: normalized.message_type,
+                      url: resolved.url.slice(0, 120),
                     });
                   } else {
                     console.warn('[webhook] enrich no reemplazó lookaside', {
-                      result: resolvedUrl?.slice(0, 80) ?? null,
+                      type: normalized.message_type,
+                      result: resolved.url?.slice(0, 80) ?? null,
                     });
                   }
                 } catch (enrichErr) {
-                  console.error('[webhook] enrichInboundEventImage error', enrichErr);
+                  console.error('[webhook] enrichInboundEventMedia error', enrichErr);
                 }
               }
             }
@@ -111,16 +118,13 @@ export async function POST(request: Request) {
           }
         }
 
-        // Process status updates
         if (statuses && statuses.length > 0) {
           for (const status of statuses) {
             const normalized = normalizeStatusEvent(status, value.metadata.phone_number_id);
             normalizedEvents.push(normalized);
 
-            // Log status to Supabase
             await logStatusToSupabase(traceId, normalized);
 
-            // Forward status to Laravel
             await forwardMessageToLaravel(normalized);
           }
         }
@@ -135,21 +139,33 @@ export async function POST(request: Request) {
   }
 }
 
-function normalizeMessageEvent(message: any, metaPhoneId: string): WebhookInboundEvent {
+function normalizeMessageEvent(message: any, _metaPhoneId: string): WebhookInboundEvent {
   const senderPhone = message.from;
   const waId = message.id;
   const timestamp = message.timestamp;
-  
+
   let eventType: WebhookInboundEvent['message_type'] = 'text';
   let text: string | undefined;
   let interactive: WebhookInboundEvent['interactive'] | undefined;
 
   if (message.type === 'text') {
-    text = message.text.body;
+    text = message.text?.body;
     eventType = 'text';
   } else if (message.type === 'image') {
     text = message.image?.caption || '📷 Imagen';
     eventType = 'image';
+  } else if (message.type === 'audio') {
+    text = '🎤 Audio';
+    eventType = 'audio';
+  } else if (message.type === 'video') {
+    text = message.video?.caption || '🎬 Video';
+    eventType = 'video';
+  } else if (message.type === 'sticker') {
+    text = '🙂 Sticker';
+    eventType = 'sticker';
+  } else if (message.type === 'document') {
+    text = message.document?.caption || message.document?.filename || '📄 Documento';
+    eventType = 'document';
   } else if (message.type === 'interactive') {
     if (message.interactive.type === 'button_reply') {
       eventType = 'interactive_button_reply';
@@ -169,8 +185,8 @@ function normalizeMessageEvent(message: any, metaPhoneId: string): WebhookInboun
   }
 
   const imageUrl =
-    message.type === 'image'
-      ? message.image?.link ?? message.image?.url ?? undefined
+    message.type === 'image' || message.type === 'sticker'
+      ? message[message.type]?.link ?? message[message.type]?.url ?? undefined
       : undefined;
 
   return {
@@ -186,7 +202,7 @@ function normalizeMessageEvent(message: any, metaPhoneId: string): WebhookInboun
   };
 }
 
-function normalizeStatusEvent(status: any, metaPhoneId: string): WebhookInboundEvent {
+function normalizeStatusEvent(status: any, _metaPhoneId: string): WebhookInboundEvent {
   return {
     event: 'status',
     from: status.recipient_id,
@@ -226,4 +242,3 @@ async function logStatusToSupabase(traceId: string, event: WebhookInboundEvent) 
     console.error('Error logging status to Supabase:', error);
   }
 }
-
