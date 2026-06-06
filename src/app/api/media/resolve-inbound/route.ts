@@ -2,13 +2,11 @@ import { NextResponse } from 'next/server';
 import { supabaseAdmin } from '@/lib/supabase';
 import { verifyRomaSyncToken } from '@/lib/whatsapp-auth';
 import {
-  downloadInboundImageToPublicUrl,
+  downloadInboundMediaToPublicUrl,
+  InboundMediaKind,
   resolveRomaApiPublicBase,
 } from '@/lib/whatsapp-media-download';
 
-/**
- * CRM llama aquí si el webhook dejó lookaside (roma-api viejo o enrich falló).
- */
 export async function POST(request: Request) {
   const auth = verifyRomaSyncToken(request);
   if (!auth.ok) {
@@ -17,6 +15,7 @@ export async function POST(request: Request) {
 
   let body: {
     wa_id?: string;
+    media_kind?: string;
     image_url?: string;
     raw?: Record<string, unknown>;
   };
@@ -30,6 +29,14 @@ export async function POST(request: Request) {
   const waId = body.wa_id?.trim();
   if (!waId) {
     return NextResponse.json({ error: 'wa_id required' }, { status: 400 });
+  }
+
+  const raw = body.raw;
+  const rawType = typeof raw?.type === 'string' ? raw.type : '';
+  const mediaKind = (body.media_kind || (rawType === 'voice' ? 'audio' : rawType) || 'image') as InboundMediaKind;
+
+  if (!['image', 'audio', 'video', 'sticker', 'document'].includes(mediaKind)) {
+    return NextResponse.json({ error: 'invalid media_kind' }, { status: 422 });
   }
 
   const { data: settings } = await supabaseAdmin
@@ -49,33 +56,31 @@ export async function POST(request: Request) {
   const publicBase = resolveRomaApiPublicBase();
   if (!publicBase) {
     return NextResponse.json(
-      {
-        ok: false,
-        error: 'ROMA_API_PUBLIC_URL not configured on roma-api',
-      },
+      { ok: false, error: 'ROMA_API_PUBLIC_URL not configured on roma-api' },
       { status: 500 }
     );
   }
 
-  console.log('[media/resolve-inbound] CRM solicitó descarga', { waId, publicBase });
+  console.log('[media/resolve-inbound] CRM solicitó descarga', { waId, mediaKind, publicBase });
 
-  const publicUrl = await downloadInboundImageToPublicUrl({
+  const result = await downloadInboundMediaToPublicUrl({
     waId,
     accessToken,
-    existingUrl: body.image_url,
-    rawMessage: body.raw,
+    mediaKind,
+    rawMessage: raw,
   });
 
-  if (!publicUrl || publicUrl.includes('lookaside.fbsbx.com')) {
+  if (!result?.url || result.url.includes('lookaside.fbsbx.com')) {
     return NextResponse.json(
-      {
-        ok: false,
-        public_url: null,
-        error: 'download_failed',
-      },
+      { ok: false, public_url: null, error: 'download_failed' },
       { status: 422 }
     );
   }
 
-  return NextResponse.json({ ok: true, public_url: publicUrl });
+  return NextResponse.json({
+    ok: true,
+    public_url: result.url,
+    mime_type: result.mime,
+    filename: result.filename,
+  });
 }
